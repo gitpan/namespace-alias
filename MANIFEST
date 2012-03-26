@@ -14,9 +14,7 @@ MANIFEST			This list of files
 MANIFEST.SKIP
 META.yml
 ppport.h
-README
-stolen_chunk_of_op.c
-stolen_chunk_of_op.h
+ptable.h
 t/basic.t
 t/lib/SomeModule.pm
 t/scope.t

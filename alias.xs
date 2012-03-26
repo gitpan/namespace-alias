@@ -11,7 +11,14 @@
 
 #include "hook_op_check.h"
 
-#include "stolen_chunk_of_op.h"
+#include "ptable.h"
+
+#if (PERL_VERSION < 10)
+#define NCA_PMOP_STASHSTARTU(o) (o->op_pmreplstart)
+#else
+#define NCA_PMOP_STASHSTARTU(o) (o->op_pmstashstartu.op_pmreplstart)
+#endif
+
 
 #define MG_UNSTRICT ((U16) (0xaffe))
 #define MG_UNCALL   ((U16) (0xafff))
@@ -25,7 +32,7 @@ typedef struct user_data_St {
     hook_op_check_id entersub;
 } user_data_t;
 
-STATIC void (*real_peep) (pTHX_ OP *);
+STATIC void (*orig_peep)(pTHX_ OP *op);
 
 STATIC SV *
 invoke_callback (pTHX_ SV *cb, SV *name)
@@ -187,36 +194,70 @@ check_alias (pTHX_ OP *op, void *user_data)
         return op;
     }
 
-    SvREFCNT_dec (name);
-    cSVOPx (op)->op_sv = replacement;
+    /*
+     * Modify name in place rather than putting replacement into the op
+     * in its stead, because the core (5.11.2+) may be relying on the
+     * name SV living in order to put it into another op.
+     */
+    sv_setsv(name, replacement);
+    SvREFCNT_dec(replacement);
 
     tag (op, MG_UNSTRICT, NULL);
 
     return op;
 }
 
-void
-peep_unstrict (pTHX_ OP *first_op)
+typedef void (*cb_t)(pTHX_ OP *o);
+
+STATIC void
+_walk_optree (pTHX_ OP *o, cb_t cb, ptable *visited)
 {
-    OP *op;
-
-    if (!first_op || NCA_OP_OPT(first_op)) {
+    if (!o || ptable_fetch(visited, o))
         return;
-    }
 
-    for (op = first_op; op; op = op->op_next) {
-        switch (op->op_type) {
-            case OP_CONST:
-                if (tagged (op, MG_UNSTRICT, NULL)) {
-                    op->op_private &= ~OPpCONST_STRICT;
-                }
-                break;
-            default:
-                break;
+    for (; o; o = o->op_next) {
+        ptable_store(visited, o, o);
+
+        switch (PL_opargs[o->op_type] & OA_CLASS_MASK) {
+        case OA_LOOP:
+            _walk_optree(aTHX_ cLOOPo->op_redoop, cb, visited);
+            _walk_optree(aTHX_ cLOOPo->op_nextop, cb, visited);
+            _walk_optree(aTHX_ cLOOPo->op_lastop, cb, visited);
+            break;
+        case OA_LOGOP:
+            _walk_optree(aTHX_ cLOGOPo->op_other, cb, visited);
+            break;
+        case OA_PMOP:
+            if (o->op_type == OP_SUBST)
+                _walk_optree(aTHX_ NCA_PMOP_STASHSTARTU(cPMOPo), cb, visited);
+            break;
         }
-    }
 
-    real_peep (aTHX_ first_op);
+        cb(aTHX_ o);
+    }
+}
+
+STATIC void
+walk_optree (pTHX_ OP *o, cb_t cb)
+{
+    ptable *visited_ops = ptable_new();
+    _walk_optree(aTHX_ o, cb, visited_ops);
+    ptable_free(visited_ops);
+}
+
+STATIC void
+unstrict (pTHX_ OP *o) {
+    if (o->op_type == OP_CONST) {
+        if (tagged (o, MG_UNSTRICT, NULL))
+            o->op_private &= ~OPpCONST_STRICT;
+    }
+}
+
+STATIC void
+peep_unstrict (pTHX_ OP *op)
+{
+    walk_optree(aTHX_ op, unstrict);
+    orig_peep(aTHX_ op);
 }
 
 STATIC OP *
@@ -303,8 +344,6 @@ setup (class, file, cb)
         ud->file = strdup (file);
         ud->cb = newSVsv (cb);
     CODE:
-        real_peep = namespace_alias_peep;
-        PL_peepp = peep_unstrict;
         ud->entersub = hook_op_check (OP_ENTERSUB, check_entersub, ud);
         ud->gv = hook_op_check (OP_GV, check_gv, ud);
         RETVAL = hook_op_check (OP_CONST, check_alias, ud);
@@ -323,3 +362,7 @@ teardown (class, hook)
         SvREFCNT_dec (ud->cb);
         free (ud->file);
         Safefree (ud);
+
+BOOT:
+    orig_peep = PL_peepp;
+    PL_peepp = peep_unstrict;

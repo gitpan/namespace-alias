@@ -3,13 +3,13 @@ use warnings;
 
 package namespace::alias;
 
-use 5.008008;
+use 5.008001;
 use XSLoader;
 use Class::MOP;
 use B::Hooks::OP::Check;
 use B::Hooks::EndOfScope;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 XSLoader::load(__PACKAGE__, $VERSION);
 
@@ -117,7 +117,15 @@ only. They may also shadow existing packages for the scope they are installed in
       Baz::baz(); # 0xaffe
   }
 
-  Bar::baz(); # 42
+  Baz::baz(); # 42
+
+=head1 BUGS
+
+Subroutine calls without parentheses around the argument list (e.g.,
+C<Baz::baz> rather than C<Baz::baz()>), on names that work through
+aliases, generally don't work on Perls prior to 5.11.2.  From Perl
+5.11.2 onwards, aliases match the behaviour of ordinary package names
+much better.
 
 =head1 SEE ALSO
 
